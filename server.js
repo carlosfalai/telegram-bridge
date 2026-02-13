@@ -1,17 +1,63 @@
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
+});
+
 const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const FormData = require('form-data');
 const fetch = require('node-fetch');
 require('dotenv').config();
 
 const app = express();
+
+// Security middleware (FIRST - before everything else)
+app.use(helmet());
+
+// Rate limiting
+const webhookLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 60, // 60 requests per minute for Telegram webhooks
+  message: 'Too many webhook requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 100, // 100 requests per minute for API routes
+  message: 'Too many API requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(express.json());
 
-// CORS - allow Orbit dashboard and any origin
+// CORS - restricted to known origins
+const allowedOrigins = [
+  'https://project-dashboard.pages.dev',
+  'https://orbit-dashboard.pages.dev',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:8080',
+];
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  const origin = req.headers.origin;
+
+  if (!origin || allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
+
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -134,8 +180,8 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'telegram-bridge', features: ['tasks', 'classification', 'cors'] });
 });
 
-// Telegram webhook endpoint
-app.post('/webhook/telegram', async (req, res) => {
+// Telegram webhook endpoint (with rate limiting)
+app.post('/webhook/telegram', webhookLimiter, async (req, res) => {
   res.sendStatus(200);
 
   try {
@@ -231,7 +277,7 @@ app.post('/webhook/telegram', async (req, res) => {
 
 // ========== EXISTING MESSAGE ENDPOINTS ==========
 
-app.get('/messages/unread', async (req, res) => {
+app.get('/messages/unread', apiLimiter, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('telegram_messages')
@@ -245,7 +291,7 @@ app.get('/messages/unread', async (req, res) => {
   }
 });
 
-app.get('/messages/latest', async (req, res) => {
+app.get('/messages/latest', apiLimiter, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
     const { data, error } = await supabase
@@ -260,7 +306,7 @@ app.get('/messages/latest', async (req, res) => {
   }
 });
 
-app.post('/messages/mark-read', async (req, res) => {
+app.post('/messages/mark-read', apiLimiter, async (req, res) => {
   try {
     const { ids } = req.body;
     const { error } = await supabase
@@ -275,7 +321,7 @@ app.post('/messages/mark-read', async (req, res) => {
 });
 
 // Reassign a message to a different project
-app.post('/messages/:id/assign', async (req, res) => {
+app.post('/messages/:id/assign', apiLimiter, async (req, res) => {
   try {
     const msgId = parseInt(req.params.id);
     const { project_id } = req.body;
@@ -303,7 +349,7 @@ app.post('/messages/:id/assign', async (req, res) => {
 // ========== TASK ENDPOINTS ==========
 
 // Get tasks, optionally filtered by project and/or status
-app.get('/tasks', async (req, res) => {
+app.get('/tasks', apiLimiter, async (req, res) => {
   try {
     let query = supabase.from('orbit_tasks').select('*');
 
@@ -325,7 +371,7 @@ app.get('/tasks', async (req, res) => {
 });
 
 // Get task counts per project (for dashboard badges)
-app.get('/tasks/summary', async (req, res) => {
+app.get('/tasks/summary', apiLimiter, async (req, res) => {
   try {
     const status = req.query.status || 'pending';
     const { data, error } = await supabase
@@ -359,7 +405,7 @@ app.get('/tasks/summary', async (req, res) => {
 });
 
 // Update a task (status, priority, project)
-app.patch('/tasks/:id', async (req, res) => {
+app.patch('/tasks/:id', apiLimiter, async (req, res) => {
   try {
     const taskId = parseInt(req.params.id);
     const updates = { updated_at: new Date().toISOString() };
@@ -385,7 +431,7 @@ app.patch('/tasks/:id', async (req, res) => {
 });
 
 // Create a task manually
-app.post('/tasks', async (req, res) => {
+app.post('/tasks', apiLimiter, async (req, res) => {
   try {
     const { project_id, title, body, priority } = req.body;
     if (!project_id || !title) {
@@ -413,7 +459,7 @@ app.post('/tasks', async (req, res) => {
 });
 
 // Get project keywords
-app.get('/projects/keywords', async (req, res) => {
+app.get('/projects/keywords', apiLimiter, async (req, res) => {
   try {
     const keywords = await getKeywords();
     res.json({ count: keywords.length, keywords });
